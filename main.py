@@ -12,59 +12,67 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-TOKEN = os.getenv('TOKEN')
+TOKEN = os.getenv("TOKEN")
 
 async def start(update: Update, context):
-    await update.message.reply_text('Привіт! Надішліть мені файл електронної книги, і я перетворю його у формат MOBI.')
+    await update.message.reply_text("Привіт! Надішліть мені файл електронної книги, і я перетворю його у формат MOBI.")
 
-async def handle_document(update: Update, context):
-    document = update.message.document
-    if document:
-        await update.message.reply_text('Напишіть ім\'я автора книги.')
-        context.user_data['document'] = document
+async def convert_book(update: Update, context):
+    if not update.message.document:
+        await update.message.reply_text("Будь ласка, надішліть файл у форматі PDF, TXT або FB2.")
+        return
 
-async def handle_author(update: Update, context):
-    author = update.message.text
-    if 'document' in context.user_data:
-        context.user_data['author'] = author
-        await update.message.reply_text('Тепер напишіть назву книги.')
+    file = await context.bot.get_file(update.message.document.file_id)
+    await update.message.reply_text("Напиши ім'я автора книги")
 
-async def handle_title(update: Update, context):
-    title = update.message.text
-    if 'author' in context.user_data and 'document' in context.user_data:
-        document = context.user_data['document']
-        author = context.user_data['author']
-        file_path = await document.get_file().download()
-        mobi_path = f"/tmp/{document.file_name.split('.')[0]}.mobi"
+    def author_name_handler(update: Update, context):
+        context.user_data['author'] = update.message.text
+        update.message.reply_text("Тепер напиши назву книги")
+
+        context.dispatcher.remove_handler(context.user_data['author_handler'])
+        context.dispatcher.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, book_title_handler))
+
+    def book_title_handler(update: Update, context):
+        context.user_data['title'] = update.message.text
+
+        document = update.message.document
+        file_name = document.file_name
+        file_path = f"/tmp/{file_name}"
+        file.download(file_path)
+
+        output_file = f"/tmp/{file_name.split('.')[0]}.mobi"
+        convert_cmd = [
+            'ebook-convert',
+            file_path,
+            output_file,
+            '--authors', context.user_data['author'],
+            '--title', context.user_data['title']
+        ]
+
         try:
-            await update.message.reply_text('Конвертую...')
-            # Перша спроба конвертації
-            command = f"ebook-convert '{file_path}' '{mobi_path}' --authors '{author}' --title '{title}'"
-            result = subprocess.run(command, shell=True, timeout=120)
-            if result.returncode != 0:
-                raise Exception("Перша спроба конвертації не вдалася.")
-            with open(mobi_path, 'rb') as mobi_file:
-                await update.message.reply_document(mobi_file, filename=f"{title}.mobi")
+            await update.message.reply_text("Конвертую...")
+            subprocess.run(convert_cmd, check=True, timeout=120)
+            await update.message.reply_document(document=output_file)
         except subprocess.TimeoutExpired:
-            await update.message.reply_text("Конвертація зайняла занадто багато часу. Спробуйте ще раз.")
-        except Exception as e:
-            await update.message.reply_text('Пробач, я не зміг конвертувати цей файл.')
-        finally:
-            context.user_data.clear()
+            await update.message.reply_text("Конвертація зайняла надто багато часу.")
+        except subprocess.CalledProcessError:
+            await update.message.reply_text("Пробач, я не зміг конвертувати цей файл.")
+        except Exception:
+            await update.message.reply_text("Стався технічний збій, спробуй пізніше.")
+
+        context.dispatcher.remove_handler(context.user_data['title_handler'])
+
+    context.dispatcher.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, author_name_handler))
 
 def main():
     application = ApplicationBuilder().token(TOKEN).build()
-    
+
     start_handler = CommandHandler('start', start)
-    document_handler = MessageHandler(filters.Document.ALL, handle_document)
-    author_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), handle_author)
-    title_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), handle_title)
-    
     application.add_handler(start_handler)
+
+    document_handler = MessageHandler(filters.Document.ALL, convert_book)
     application.add_handler(document_handler)
-    application.add_handler(author_handler)
-    application.add_handler(title_handler)
-    
+
     application.run_polling()
 
 if __name__ == '__main__':
