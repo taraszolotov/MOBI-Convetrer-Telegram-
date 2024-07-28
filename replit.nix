@@ -1,7 +1,8 @@
 { pkgs }: {
   deps = [
-    pkgs.python310Full
-    pkgs.python310Packages.python-telegram-bot
-    pkgs.calibre
+    pkgs.python38Full
+    pkgs.python38Packages.pip
+    pkgs.python38Packages.setuptools
+    pkgs.python38Packages.wheel
   ];
 }
