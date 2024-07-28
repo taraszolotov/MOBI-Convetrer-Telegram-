@@ -10,6 +10,9 @@ import subprocess
 # Встановіть ваш токен тут
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
+if not TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN не встановлений в середовищі")
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
