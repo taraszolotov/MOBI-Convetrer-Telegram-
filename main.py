@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 import subprocess
 
-# Встановіть ваш токен тут
+# Отримання токена з середовища
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 if not TOKEN:
