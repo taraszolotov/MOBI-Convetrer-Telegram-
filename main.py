@@ -1,110 +1,93 @@
 import os
 import logging
-from telegram import Update, InputFile
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler
-from telegram.error import BadRequest
-import ebooklib
-from ebooklib import epub
-from PyPDF2 import PdfReader
-import tempfile
+from telegram import Update, Bot
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext.dispatcher import run_async
 import subprocess
-import uuid
+from functools import wraps
 
-# Enable logging
+# Налаштування журналювання
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+    format='%(asctime)s - %(name)s - %(levelень) - %(message)s',
+    level=logging.INFO
 )
+
 logger = logging.getLogger(__name__)
 
-AUTHOR, TITLE, FILE = range(3)
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-def start(update: Update, context: CallbackContext) -> int:
-    update.message.reply_text("Привіт! Надішліть мені файл електронної книги, і я перетворю його у формат MOBI.")
-    return FILE
+if not TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN не встановлений в середовищі")
 
-def handle_file(update: Update, context: CallbackContext) -> int:
+bot = Bot(TOKEN)
+
+def start(update: Update, context: CallbackContext) -> None:
+    update.message.reply_text('Привіт! Надішліть мені файл електронної книги, і я перетворю його у формат MOBI.')
+
+@run_async
+def convert_to_mobi(file_path, author, title):
+    try:
+        subprocess.run(
+            ['ebook-convert', file_path, file_path.replace('.pdf', '.mobi'), 
+             '--authors', author, '--title', title],
+            check=True,
+            timeout=120
+        )
+        return file_path.replace('.pdf', '.mobi')
+    except subprocess.TimeoutExpired:
+        try:
+            subprocess.run(
+                ['calibre-debug', '-r', 'convert', file_path, file_path.replace('.pdf', '.mobi'), 
+                 '--authors', author, '--title', title],
+                check=True,
+                timeout=120
+            )
+            return file_path.replace('.pdf', '.mobi')
+        except Exception as e:
+            logger.error(f"Помилка під час конвертації: {e}")
+            return None
+    except Exception as e:
+        logger.error(f"Помилка під час конвертації: {e}")
+        return None
+
+def send_file(update: Update, context: CallbackContext, file_path: str) -> None:
+    chat_id = update.message.chat_id
+    context.bot.send_document(chat_id, document=open(file_path, 'rb'))
+
+def handle_document(update: Update, context: CallbackContext) -> None:
     file = update.message.document
-    file_name = file.file_name
-    new_file = context.bot.get_file(file.file_id)
-    
-    with tempfile.NamedTemporaryFile(delete=False) as tf:
-        new_file.download(custom_path=tf.name)
-        context.user_data['file_path'] = tf.name
-        context.user_data['original_file_name'] = file_name
-    
-    update.message.reply_text("Напиши ім'я автора книги:")
-    return AUTHOR
+    file_path = os.path.join('/tmp', file.file_name)
+    file.get_file().download(file_path)
+    update.message.reply_text("Напишіть ім'я автора книги")
+    context.user_data['file_path'] = file_path
 
-def ask_title(update: Update, context: CallbackContext) -> int:
+def handle_author(update: Update, context: CallbackContext) -> None:
     author = update.message.text
     context.user_data['author'] = author
-    update.message.reply_text("Тепер напиши назву книги:")
-    return TITLE
+    update.message.reply_text("Тепер напишіть назву книги")
 
-def convert_book(update: Update, context: CallbackContext) -> int:
+def handle_title(update: Update, context: CallbackContext) -> None:
     title = update.message.text
-    author = context.user_data['author']
+    context.user_data['title'] = title
+    update.message.reply_text("Конвертую...")
     file_path = context.user_data['file_path']
-    original_file_name = context.user_data['original_file_name']
-
-    output_file = os.path.splitext(original_file_name)[0] + '.mobi'
-    output_path = os.path.join(tempfile.gettempdir(), output_file)
-    
-    try:
-        update.message.reply_text("Конвертую...")
-        
-        result = subprocess.run([
-            'ebook-convert', file_path, output_path,
-            '--authors', author,
-            '--title', title
-        ], capture_output=True, text=True, timeout=120)
-        
-        if result.returncode != 0:
-            raise Exception(result.stderr)
-        
-        with open(output_path, 'rb') as f:
-            update.message.reply_document(document=f, filename=output_file)
-    except subprocess.TimeoutExpired:
-        update.message.reply_text("Конвертація триває занадто довго. Спробуйте інший файл або зменшіть розмір файлу.")
-    except BadRequest as e:
-        if "File is too big" in str(e):
-            update.message.reply_text("Файл завеликий.")
-        else:
-            update.message.reply_text(f"Сталася помилка: {str(e)}")
-    except Exception as e:
-        update.message.reply_text(f"Сталася помилка під час конвертації: {str(e)}")
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
-    
-    return ConversationHandler.END
-
-def cancel(update: Update, context: CallbackContext) -> int:
-    update.message.reply_text('Операція скасована.')
-    return ConversationHandler.END
+    author = context.user_data['author']
+    title = context.user_data['title']
+    result = convert_to_mobi(file_path, author, title)
+    if result:
+        send_file(update, context, result)
+    else:
+        update.message.reply_text("Сталася помилка під час конвертації файлу.")
 
 def main() -> None:
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not TOKEN:
-        raise ValueError("TELEGRAM_BOT_TOKEN не встановлений в середовищі")
-    
-    updater = Updater(TOKEN)
+    updater = Updater(TOKEN, use_context=True)
     dispatcher = updater.dispatcher
-    
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
-        states={
-            FILE: [MessageHandler(Filters.document, handle_file)],
-            AUTHOR: [MessageHandler(Filters.text & ~Filters.command, ask_title)],
-            TITLE: [MessageHandler(Filters.text & ~Filters.command, convert_book)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
 
-    dispatcher.add_handler(conv_handler)
-    
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(MessageHandler(Filters.document.mime_type("application/pdf"), handle_document))
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_author))
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_title))
+
     updater.start_polling()
     updater.idle()
 
